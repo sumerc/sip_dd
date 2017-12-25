@@ -100,32 +100,32 @@ class SipDDSniffer(object):
                 with open(file_name + '.rates', 'wb') as f:
                     pickle.dump(self.rates[period], f)
 
-            # TODO: if any period exceeds any period's suspect edge?
-            #if self.current_edge > self.suspect_edge or \
-            #    self.current_limit > self.suspect_limit:
-            #    import pprint;
-            #    pprint.pprint(self.counters)
-                """
-                If any of rules higher than SL, then 
-                    Detect Mode is activated and creates alarm
-                        Send email as "Rule X is activated. There may be an attack from SourceIP to DestinationIP."
-                If the current SIP traffic rate is higher than AL, then
-                    Drop Mode is activated and creates alarm
-                        Send email as "There was an attack from SourceIP to DestinationIP and SIP packets from SourceIP are being dropped for 5 minutes."
-                        Drop SIP packets from SourceIP for 5 minutes.
-                If the current SIP traffic rate is still more than 5% below the Inbound Packet Rate Limit, then
-                    Block Mode is activated and creates alarm
-                        Send email as "There was an attack from SourceIP to DestinationIP and SourceIP is blocked for 5 minutes."
-                """
-            #    pass
+                if self.current_edge(period) > self.suspect_edge(period) or \
+                    self.current_limit(period) > self.suspect_limit(period):
+
+                    # traverse all counters and check if any of them exceeds the suspect limit
+                    for rule_no, counter in self.counters['rules'].items():
+                        for ip, v in counter.items():
+                            if v > self.suspect_limit(period):
+                                print('Send email as "Rule X is activated. There may be an attack from SourceIP to DestinationIP."')
+                    
+                    """
+                    If any of rules higher than SL, then 
+                        Detect Mode is activated and creates alarm
+                            Send email as "Rule X is activated. There may be an attack from SourceIP to DestinationIP."
+                    If the current SIP traffic rate is higher than AL, then
+                        Drop Mode is activated and creates alarm
+                            Send email as "There was an attack from SourceIP to DestinationIP and SIP packets from SourceIP are being dropped for 5 minutes."
+                            Drop SIP packets from SourceIP for 5 minutes.
+                    If the current SIP traffic rate is still more than 5% below the Inbound Packet Rate Limit, then
+                        Block Mode is activated and creates alarm
+                            Send email as "There was an attack from SourceIP to DestinationIP and SourceIP is blocked for 5 minutes.
+                    """
 
             # counters hold the rule related data
-            self.counters = {'rule1': Counter(),
-                             'rule2': Counter(),
-                             'rule3_per_cseq': defaultdict(Counter),
-                             'rule3': Counter(), 
-                             'rule4_per_cseq': defaultdict(Counter),
-                             'rule4': Counter(),}
+            self.counters = {'rules': {1: Counter(), 2: Counter(), 3: Counter(), 4: Counter()}
+                             '_rule3_per_cseq': defaultdict(Counter),
+                             '_rule4_per_cseq': defaultdict(Counter),}
 
             time.sleep(RATE_CALCULATE_INTERVAL)
 
@@ -157,23 +157,23 @@ class SipDDSniffer(object):
 
             # Rule-1
             if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                self.counters['rule1'][src_ip] += 1
+                self.counters['rules'][1][src_ip] += 1
 
             # Rule-2
             if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                self.counters['rule2'][dst_ip] += 1
+                self.counters['rules'][2][dst_ip] += 1
             
             # Rule-3
             if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                self.counters['rule3_per_cseq'][src_ip][cseq] += 1
-                self.counters['rule3'][src_ip] = \
-                    min(2, (self.counters['rule3_per_cseq'][src_ip][cseq]//4)+1)
+                self.counters['_rule3_per_cseq'][src_ip][cseq] += 1
+                self.counters['rules'][3][src_ip] = \
+                    min(2, (self.counters['_rule3_per_cseq'][src_ip][cseq]//4)+1)
 
             # Rule-4
             if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                self.counters['rule4_per_cseq'][dst_ip][cseq] += 1
-                self.counters['rule4'][dst_ip] = \
-                    min(2, (self.counters['rule4_per_cseq'][dst_ip][cseq]//4)+1)
+                self.counters['_rule4_per_cseq'][dst_ip][cseq] += 1
+                self.counters['rules'][4][dst_ip] = \
+                    min(2, (self.counters['_rule4_per_cseq'][dst_ip][cseq]//4)+1)
 
         except Exception as e:
             import traceback; traceback.print_exc()

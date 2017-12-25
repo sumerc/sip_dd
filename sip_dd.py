@@ -32,7 +32,7 @@ def _get_dump_file_names():
         now.year)
     mfn = 'monthly/%s.%d' % (abbr_month_name, now.year)
 
-    return [hfn, dfn, wfn, mfn]
+    return [('hourly', hfn), ('daily', dfn), ('weekly', wfn), ('monthly', mfn)]
 
 # TODO: Write a mock way to simulate traffic from a pcap file(for testing)
 
@@ -43,148 +43,137 @@ class SipDDSniffer(object):
     Note: I don't care too much about thread-safety since data intensive stuff happens
     on files, only simple conf./status is passed between threads.
     """
-    ACTIVATE_ACTION_MODULE = True # TODO: used for debuggiing, remove after debug
 
     def __init__(self, args):
         self.args = args
         self.in_packet_rate_limit=self.args.inbound_traffic_rate_in_kbps/MAX_UDP_SIP_PACKET_SIZE
         
         self.total_len_in_bytes = 0
-        self.current_rate = 0 # kbps
-        self.suspect_rate_exceeded = True
+        self.current_rate_in_kpbs = 0 # kbps
         self.counters = {}
+        self.rates = {}
 
-    def _load_counters(self):
-        for file_name in _get_dump_file_names():
+    def _load_rates(self):
+        for period, file_name in _get_dump_file_names():
             try:
                 with open(file_name + '.rates', 'rb') as f:
-                    self.rates = pickle.load(f)
+                    self.rates[period] = pickle.load(f)
             except FileNotFoundError:
-                self.rates = {'total_sum':0, 'sample_count': 0, 'max': 0}
+                self.rates[period] = {'total_sum':0, 'sample_count': 0, 'max': 0}
 
-    def _save_counters(self):
-        for file_name in _get_dump_file_names():
-            with open(file_name + '.rates', 'wb') as f:
-                pickle.dump(self.rates, f)
+    def current_edge(self, period):
+        return self.current_rate_in_kpbs
 
-    @property
-    def current_edge(self):
-        return self.current_rate
+    def normal_edge(self, period):
+        return self.rates[period]['total_sum'] / self.rates[period]['sample_count']
 
-    @property
-    def normal_edge(self):
-        return self.rates['total_sum'] / self.rates['sample_count']
+    def attack_edge(self, period):
+        return self.rates[period]['max']
 
-    @property
-    def attack_edge(self):
-        return self.rates['max']
+    def suspect_edge(self, period):
+        return (self.attack_edge(period) + self.normal_edge(period)) / 2
 
-    @property
-    def suspect_edge(self):
-        return (self.attack_edge + self.normal_edge) / 2
+    def current_limit(self, period):
+        return (self.current_edge(period) / MAX_UDP_SIP_PACKET_SIZE)
 
-    @property
-    def current_limit(self):
-        return (self.current_edge / MAX_UDP_SIP_PACKET_SIZE)
-
-    @property
-    def normal_limit(self):
-        return (self.normal_edge / MAX_UDP_SIP_PACKET_SIZE)
+    def normal_limit(self, period):
+        return (self.normal_edge(period) / MAX_UDP_SIP_PACKET_SIZE)
     
-    @property
-    def suspect_limit(self):
-        return (self.suspect_edge / MAX_UDP_SIP_PACKET_SIZE)
+    def suspect_limit(self, period):
+        return (self.suspect_edge(period) / MAX_UDP_SIP_PACKET_SIZE)
     
-    @property
-    def attack_limit(self):
-        return (self.attack_limit / MAX_UDP_SIP_PACKET_SIZE)
+    def attack_limit(self, period):
+        return (self.attack_limit(period) / MAX_UDP_SIP_PACKET_SIZE)
     
     def _calc_rate(self):
         prev_tot_len = self.total_len_in_bytes
         while(True):
-            self.current_rate = \
+            self.current_rate_in_kpbs = \
                 (self.total_len_in_bytes-prev_tot_len) / 1024 / RATE_CALCULATE_INTERVAL
             prev_tot_len = self.total_len_in_bytes
             
-            self.rates['total_sum'] += self.current_rate
-            self.rates['sample_count'] += 1
-            self.rates['max'] = max(self.rates['max'], self.current_rate)
+            # save rates
+            for period, file_name in _get_dump_file_names():
+                self.rates[period]['total_sum'] += self.current_rate_in_kpbs
+                self.rates[period]['sample_count'] += 1
+                self.rates[period]['max'] = max(self.rates[period]['max'], self.current_rate_in_kpbs)
+                with open(file_name + '.rates', 'wb') as f:
+                    pickle.dump(self.rates[period], f)
 
-            self._save_counters()
+            # TODO: if any period exceeds any period's suspect edge?
+            #if self.current_edge > self.suspect_edge or \
+            #    self.current_limit > self.suspect_limit:
+            #    import pprint;
+            #    pprint.pprint(self.counters)
+                """
+                If any of rules higher than SL, then 
+                    Detect Mode is activated and creates alarm
+                        Send email as "Rule X is activated. There may be an attack from SourceIP to DestinationIP."
+                If the current SIP traffic rate is higher than AL, then
+                    Drop Mode is activated and creates alarm
+                        Send email as "There was an attack from SourceIP to DestinationIP and SIP packets from SourceIP are being dropped for 5 minutes."
+                        Drop SIP packets from SourceIP for 5 minutes.
+                If the current SIP traffic rate is still more than 5% below the Inbound Packet Rate Limit, then
+                    Block Mode is activated and creates alarm
+                        Send email as "There was an attack from SourceIP to DestinationIP and SourceIP is blocked for 5 minutes."
+                """
+            #    pass
 
-            if self.args.verbose:
-                print("Current Edge: %d\n Normal Edge:%d\n, Suspect Edge: %d\n, "
-                    "Attack Edge: %d\n" % (self.current_edge, self.normal_edge, 
-                    self.suspect_edge, self.attack_edge))
-
-            # check and do suspect actions and reset fields
-            if self.suspect_rate_exceeded or self.ACTIVATE_ACTION_MODULE:
-                # TODO: Check if SLs reached and do some actions
-                import pprint;
-                pprint.pprint(self.counters)
-
-            self.suspect_rate_exceeded = False
+            # counters hold the rule related data
             self.counters = {'rule1': Counter(),
                              'rule2': Counter(),
                              'rule3_per_cseq': defaultdict(Counter),
                              'rule3': Counter(), 
                              'rule4_per_cseq': defaultdict(Counter),
                              'rule4': Counter(),}
-            
-            if self.current_edge > self.suspect_edge or \
-                self.current_limit > self.suspect_limit:
-                self.suspect_rate_exceeded = True
 
             time.sleep(RATE_CALCULATE_INTERVAL)
 
     def _on_pkt_recv(self, pkt):
         try:
-            for file_name in _get_dump_file_names():
+            for _, file_name in _get_dump_file_names():
                 wrpcap(file_name + '.pcap', pkt, append=True)
             
             self.total_len_in_bytes += pkt.len
 
-            if self.suspect_rate_exceeded or self.ACTIVATE_ACTION_MODULE:
-                try:
-                    src_ip = pkt[IP].src
-                    dst_ip = pkt[IP].src
-                    sip_data = pkt[Raw].load.decode("ascii")
-                    
-                    # TODO: I am sure there is a better alternative to extract CSeq 
-                    # value from a sip msg but this simply works.
-                    cseq = None
-                    sip_data_splitted = sip_data.split()
-                    for i, a in enumerate(sip_data_splitted):
-                        if a == 'CSeq:':
-                            cseq = sip_data_splitted[i+1]
-                            break
-                    if cseq is None:
-                        raise Exception("CSeq not found.")
-                except IndexError:
-                    return
-
-                # TODO: For lab purpose we will use the IP address in From header in the Application Layer. 
-
-                # Rule-1
-                if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                    self.counters['rule1'][src_ip] += 1
-
-                # Rule-2
-                if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                    self.counters['rule2'][dst_ip] += 1
+            try:
+                # TODO: For lab purpose we will use the IP address in From header in the Application Layer.
+                src_ip = pkt[IP].src
+                dst_ip = pkt[IP].src
+                sip_data = pkt[Raw].load.decode("ascii")
                 
-                # Rule-3
-                if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                    self.counters['rule3_per_cseq'][src_ip][cseq] += 1
-                    self.counters['rule3'][src_ip] = \
-                        min(2, (self.counters['rule3_per_cseq'][src_ip][cseq]//4)+1)
-                    
+                # TODO: I am sure there is a better alternative to extract CSeq 
+                # value from a sip msg but this simply works.
+                cseq = None
+                sip_data_splitted = sip_data.split()
+                for i, a in enumerate(sip_data_splitted):
+                    if a == 'CSeq:':
+                        cseq = sip_data_splitted[i+1]
+                        break
+                if cseq is None:
+                    raise Exception("CSeq not found.")
+            except IndexError:
+                return
 
-                # Rule-4
-                if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
-                    self.counters['rule4_per_cseq'][dst_ip][cseq] += 1
-                    self.counters['rule4'][dst_ip] = \
-                        min(2, (self.counters['rule4_per_cseq'][dst_ip][cseq]//4)+1)
+            # Rule-1
+            if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
+                self.counters['rule1'][src_ip] += 1
+
+            # Rule-2
+            if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
+                self.counters['rule2'][dst_ip] += 1
+            
+            # Rule-3
+            if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
+                self.counters['rule3_per_cseq'][src_ip][cseq] += 1
+                self.counters['rule3'][src_ip] = \
+                    min(2, (self.counters['rule3_per_cseq'][src_ip][cseq]//4)+1)
+
+            # Rule-4
+            if any(x in sip_data for x in ['INVITE sip', 'REGISTER sip']):
+                self.counters['rule4_per_cseq'][dst_ip][cseq] += 1
+                self.counters['rule4'][dst_ip] = \
+                    min(2, (self.counters['rule4_per_cseq'][dst_ip][cseq]//4)+1)
 
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -194,7 +183,7 @@ class SipDDSniffer(object):
             filter=self.args.bpf_filter, store=0)
 
     def start(self):
-        self._load_counters()
+        self._load_rates()
 
         self._rate_calculator_thread = threading.Thread(target=self._calc_rate, args=())
         self._rate_calculator_thread.start()

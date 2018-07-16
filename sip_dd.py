@@ -114,13 +114,13 @@ class SipDDSniffer(object):
                                 # TODO: Send email
                             if v > self.attack_limit(period):
                                 print('There was an attack from %s. SIP packets are being'
-                                    ' dropped for %d mins.' % (ip, PACKET_DROP_INTERVAL//60))
+                                    ' blocked for %d mins.' % (ip, PACKET_DROP_INTERVAL//60))
                                 # TODO: Send email
                                 # TODO: Drop packets
                             # current SIP traffic is more than %95 of SIP packet rate limit
                             if v >= ((95*self.in_packet_rate_limit) // 100):
-                                print('There was an attack from %s. SIP packets are being'
-                                    ' dropped for %d mins.' % (ip, PACKET_DROP_INTERVAL//60))
+                                print('There was an attack from %s.(in_packet_rate saturated.) SIP packets are being'
+                                    ' blocked for %d mins.' % (ip, PACKET_DROP_INTERVAL//60))
                                 # TODO: Send email
                                 # TODO: Drop packets
 
